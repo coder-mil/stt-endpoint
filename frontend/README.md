@@ -38,6 +38,16 @@ Bundle atual: ~187 kB (60 kB gzip). Apenas React + React Router DOM.
 npm run lint
 ```
 
+## Docker
+
+```bash
+cd ../ && docker compose up -d frontend
+```
+
+A imagem usa nginx (multi-stage build) e o `nginx.conf` interno faz proxy
+de `/api`, `/auth`, `/csrf-mint`, `/docs`, `/openapi.json`, `/health`, `/ready`
+para `auth-service:4000`. Em dev local, o `vite.config.js` faz o mesmo proxy.
+
 ## Como fala com o backend
 
 `src/lib/api.js` é um fetch wrapper que:

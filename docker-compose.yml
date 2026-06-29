@@ -1,45 +1,58 @@
-# Local development compose — CPU-only by default.
-# Usage:
-#   cp .env.example .env  &&  docker compose up --build
+# =============================================================================
+# STT Endpoint — full stack
 #
-# For GPU, run with:  docker compose --profile cuda up
+# One command to bring up the whole app (CPU):
+#   cp .env.example .env   # fill secrets
+#   docker compose up --build
 #
-# ------------------------------------------------------------ base service
+# Open:
+#   http://localhost:8080       (frontend / nginx)
+#   http://localhost:8080/docs  (Swagger UI, proxied)
+#
+# GPU profile (NVIDIA + nvidia-container-toolkit required):
+#   docker compose --profile gpu-cpu up --build     # CPU STT
+#   docker compose --profile gpu up --build         # CUDA STT
+# =============================================================================
+
+# ---- Reusable anchor blocks via YAML extension ----
+x-stt-common: &stt-common
+  volumes:
+    - stt_models:/app/models
+
 services:
+
+  # ========================================================== STT (CPU)
   stt:
+    <<: *stt-common
     build:
       context: .
-      dockerfile: Dockerfile
-    image: stt-endpoint:local
+      dockerfile: app/Dockerfile
+    image: coder-mil/stt-endpoint:cpu
     container_name: stt-endpoint
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: .env
     environment:
       STT_DEVICE: ${STT_DEVICE:-cpu}
       STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./models:/app/models
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 30s
       timeout: 5s
-      start_period: 60s
+      start_period: 90s
       retries: 3
+    networks: [sttnet]
 
-# ------------------------------------------------------------ GPU profile
-  stt-cuda:
-    profiles: ["cuda"]
+  # ========================================================== STT (GPU profile)
+  stt-gpu:
+    <<: *stt-common
+    profiles: ["gpu"]
     build:
       context: .
-      dockerfile: Dockerfile.cuda
-    image: stt-endpoint:cuda
-    container_name: stt-endpoint-cuda
+      dockerfile: app/Dockerfile.cuda
+    image: coder-mil/stt-endpoint:cuda
+    container_name: stt-endpoint-gpu
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: .env
     environment:
       STT_DEVICE: cuda
       STT_COMPUTE_TYPE: float16
@@ -50,7 +63,131 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    ports:
-      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 240s        # GPU model load is slow on first run
+      retries: 5
+    networks: [sttnet]
+
+  # ========================================================== Auth (Express + SQLite)
+  auth:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    image: coder-mil/stt-endpoint-auth:local
+    container_name: stt-endpoint-auth
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: file:/data/dev.db
+      NODE_ENV: production
+      STT_ENDPOINT: http://stt:8000
+      STT_API_KEY: ${STT_API_KEY}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      CSRF_SECRET: ${CSRF_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      PORT: 4000
     volumes:
-      - ./models:/app/models
+      - auth_data:/data
+    depends_on:
+      stt:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks: [sttnet]
+
+  # ========================================================== Auth (GPU profile)
+  auth-gpu:
+    profiles: ["gpu"]
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    image: coder-mil/stt-endpoint-auth:local
+    container_name: stt-endpoint-auth-gpu
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: file:/data/dev.db
+      NODE_ENV: production
+      STT_ENDPOINT: http://stt-gpu:8000
+      STT_API_KEY: ${STT_API_KEY}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      CSRF_SECRET: ${CSRF_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      PORT: 4000
+    volumes:
+      - auth_data:/data
+    depends_on:
+      stt-gpu:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks: [sttnet]
+
+  # ========================================================== Frontend (nginx + SPA)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ""
+    image: coder-mil/stt-endpoint-ui:local
+    container_name: stt-endpoint-frontend
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    networks: [sttnet]
+
+  frontend-gpu:
+    profiles: ["gpu"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ""
+    image: coder-mil/stt-endpoint-ui:local
+    container_name: stt-endpoint-frontend-gpu
+    restart: unless-stopped
+    depends_on:
+      auth-gpu:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    networks: [sttnet]
+
+volumes:
+  stt_models:    # Whisper model cache (shared CPU/GPU)
+  auth_data:     # SQLite DB — survives compose down
+
+networks:
+  sttnet:
+    driver: bridge
