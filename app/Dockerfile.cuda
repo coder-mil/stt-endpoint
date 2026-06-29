@@ -2,11 +2,16 @@
 # =============================================================================
 # STT Endpoint — CUDA build of the FastAPI service.
 #
-# Use via: docker compose --profile cuda up
+# Use via: docker compose --profile gpu up
 #
 # Requirements on the host:
 #   - nvidia-container-toolkit installed
 #   - a CUDA-capable GPU (compute capability >= 3.5)
+#
+# The default Whisper model is pre-baked into the image (using CPU
+# quantization on the baker side; the runtime uses float16 on GPU but
+# the downloaded weights are the same).
+# Override with --build-arg STT_MODEL_SIZE=...
 # =============================================================================
 
 # -------- Stage 1: build the wheel --------
@@ -23,20 +28,41 @@ COPY app ./app
 RUN python -m pip install --no-cache-dir --upgrade pip build \
  && python -m build --wheel --outdir /dist
 
-# -------- Stage 2: CUDA runtime --------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+# -------- Stage 2: CUDA runtime base --------
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime-base
 WORKDIR /app
 
-# curl for healthcheck; libgomp1 + libssl3 for faster-whisper/numpy.
+# python 3.11 + curl + libs (faster-whisper needs libgomp1 + libssl3).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3.11 python3.11-venv python3-pip \
         python3.11-dev curl ca-certificates libgomp1 libssl3 \
  && ln -sf /usr/bin/python3.11 /usr/bin/python \
  && rm -rf /var/lib/apt/lists/*
 
-# python -m pip / install the wheel compiled in stage 1.
 COPY --from=builder /dist/*.whl /tmp/
 RUN python -m pip install --no-cache-dir /tmp/*.whl
+
+# -------- Stage 3: pre-bake the Whisper model --------
+ARG STT_MODEL_SIZE=base
+FROM runtime-base AS baker
+
+# Sanitize: tiny/base/small/medium/large[-v2|-v3] only.
+RUN case "$STT_MODEL_SIZE" in \
+       tiny|base|small|medium|large|large-v2|large-v3|distil-large-v3) ;; \
+       *) echo "Invalid STT_MODEL_SIZE: $STT_MODEL_SIZE" && exit 1 ;; \
+     esac
+
+ENV STT_MODELS_DIR=/app/models
+
+RUN python -c "\
+import os; os.environ['HF_HUB_DISABLE_PROGRESS_BARS']='1'; \
+from faster_whisper import WhisperModel; \
+WhisperModel(os.environ['STT_MODEL_SIZE'], device='cpu', \
+             compute_type='int8', download_root='/app/models'); \
+print('baked model:', os.environ['STT_MODEL_SIZE'])" || (echo 'bake failed'; exit 1)
+
+# -------- Stage 4: CUDA runtime --------
+FROM runtime-base AS runtime
 
 ENV STT_MODELS_DIR=/app/models \
     STT_DEVICE=cuda \
@@ -44,12 +70,12 @@ ENV STT_MODELS_DIR=/app/models \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN mkdir -p /app/models
-VOLUME ["/app/models"]
+# Pull the pre-baked model files in.
+COPY --from=baker /app/models /app/models
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
-  CMD curl -fsS http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
+  CMD curl -fsS http://localhost:8000/ready >/dev/null 2>&1 || exit 1
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

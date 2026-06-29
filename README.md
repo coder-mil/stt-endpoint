@@ -24,11 +24,22 @@ Ver documentação detalhada por subsistema:
 | Auth (Node)   | Express · Prisma · SQLite · JWT · CSRF       | `4000`       |
 | Frontend      | React 18 · React Router · Vite               | `5173`       |
 
-## Quickstart (dev)
+## Quickstart (Docker, recomendado)
+
+```bash
+cp .env.example .env             # preencha JWT_*, CSRF_*, STT_API_KEY
+docker compose up --build        # primeira vez: 1-3 min (baixa modelo Whisper)
+open http://localhost:8080
+```
+
+A imagem do STT vem com o modelo Whisper **pré-baked** — não há download
+durante a primeira transcrição.
+
+## Quickstart (dev local, sem Docker)
 
 ```bash
 # 1. Backend Python (STT real)
-pip install -e ".[dev]"`
+pip install -e ".[dev]"
 cp .env.example .env        # fill in STT_API_KEY
 uvicorn app.main:app --reload --port 8000
 

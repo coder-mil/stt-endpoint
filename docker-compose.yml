@@ -10,23 +10,22 @@
 #   http://localhost:8080/docs  (Swagger UI, proxied)
 #
 # GPU profile (NVIDIA + nvidia-container-toolkit required):
-#   docker compose --profile gpu-cpu up --build     # CPU STT
-#   docker compose --profile gpu up --build         # CUDA STT
+#   docker compose --profile gpu up --build
+#
+# Pre-baked Whisper model: the STT container ships with the default model
+# already downloaded into /app/models. Override via --build-arg:
+#   STT_MODEL_SIZE=small docker compose build stt
 # =============================================================================
-
-# ---- Reusable anchor blocks via YAML extension ----
-x-stt-common: &stt-common
-  volumes:
-    - stt_models:/app/models
 
 services:
 
   # ========================================================== STT (CPU)
   stt:
-    <<: *stt-common
     build:
       context: .
       dockerfile: app/Dockerfile
+      args:
+        STT_MODEL_SIZE: ${STT_MODEL_SIZE:-base}
     image: coder-mil/stt-endpoint:cpu
     container_name: stt-endpoint
     restart: unless-stopped
@@ -34,21 +33,24 @@ services:
     environment:
       STT_DEVICE: ${STT_DEVICE:-cpu}
       STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
+    volumes:
+      - stt_models:/app/models
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/ready"]
       interval: 30s
       timeout: 5s
-      start_period: 90s
+      start_period: 30s        # model is baked in, so no download delay
       retries: 3
     networks: [sttnet]
 
   # ========================================================== STT (GPU profile)
   stt-gpu:
-    <<: *stt-common
     profiles: ["gpu"]
     build:
       context: .
       dockerfile: app/Dockerfile.cuda
+      args:
+        STT_MODEL_SIZE: ${STT_MODEL_SIZE:-base}
     image: coder-mil/stt-endpoint:cuda
     container_name: stt-endpoint-gpu
     restart: unless-stopped
@@ -56,6 +58,8 @@ services:
     environment:
       STT_DEVICE: cuda
       STT_COMPUTE_TYPE: float16
+    volumes:
+      - stt_models:/app/models
     deploy:
       resources:
         reservations:
@@ -64,10 +68,10 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/ready"]
       interval: 30s
       timeout: 10s
-      start_period: 240s        # GPU model load is slow on first run
+      start_period: 90s        # baked in; only CTranslate2 init on GPU
       retries: 5
     networks: [sttnet]
 

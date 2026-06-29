@@ -63,6 +63,34 @@ qual device está ativo.
 Recomendado usar **valores distintos** para cada um. Mas todos precisam estar
 presentes ou o serviço **não sobe** (validação fail-fast em `lib/env.js`).
 
+## Modelo Whisper pré-baked
+
+Ambos `Dockerfile` (CPU) e `Dockerfile.cuda` (GPU) têm um **stage `baker`**
+que baixa o modelo Whisper durante o build e o embute na imagem final.
+Isso significa que **a primeira transcrição já é instantânea** — sem
+download em runtime.
+
+| `STT_MODEL_SIZE` | Tamanho | RAM/CPU | RAM/GPU |
+|------------------|--------:|--------:|--------:|
+| `tiny`           | ~75 MB  | ~390 MB | ~1 GB   |
+| `base` (default) | ~142 MB | ~500 MB | ~1.5 GB |
+| `small`          | ~466 MB | ~1 GB   | ~2.5 GB |
+| `medium`         | ~1.5 GB | ~3 GB   | ~3.5 GB |
+| `large-v3`       | ~3 GB   | ~5 GB+  | ~4.5 GB |
+
+Para trocar de modelo:
+
+```bash
+# 1. Editar .env: STT_MODEL_SIZE=small
+# 2. Reconstruir imagem (não basta restart):
+docker compose build stt
+docker compose up -d stt
+```
+
+Para mudar **sem rebuild** (downside: modelo vai pra o volume e vai
+re-download se o volume sumir), comente o `COPY --from=baker /app/models`
+do Dockerfile e deixe o volume persistente cuidar.
+
 ## Configuração em produção (HTTPS)
 
 1. Botar um reverse proxy com HTTPS na frente (Traefik, Caddy, Cloudflare Tunnel,
