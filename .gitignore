@@ -1,40 +1,43 @@
+# Python (STT)
 __pycache__/
 *.py[cod]
-*$py.class
 *.egg-info/
-.eggs/
-dist/
-build/
-
-# Virtualenv
 .venv/
 venv/
-env/
-ENV/
-
-# Test/cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
-
-# Runtime
+models/
 *.log
 *.pid
-
-# Env / secrets
 .env
 .env.*
 !.env.example
 
-# Whisper models (downloaded at runtime)
-models/
-*.bin
-*.pt
+# Node (auth-service + frontend)
+node_modules/
+dist/
+.cache/
+.parcel-cache/
+*.tsbuildinfo
+.DS_Store
+coverage/
 
-# IDE
+# Editor
 .vscode/
 .idea/
 *.swp
-.DS_Store
+
+# Local SQLite databases (regenerated with `prisma db push`)
+*.db
+*.db-journal
+prisma/dev.db
+prisma/test.db
+
+# Build artifacts
+auth-service/prisma/dev.db
+auth-service/prisma/test.db
+auth-service/coverage/
+frontend/dist/

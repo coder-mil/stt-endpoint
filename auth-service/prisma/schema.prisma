@@ -1,0 +1,85 @@
+// Prisma schema — auth-service
+// All variables read from .env via DATABASE_URL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String?
+  role         String    @default("user")     // "user" | "admin"
+  verified     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  sessions     Session[]
+  resets       PasswordReset[]
+  apiKeys      ApiKey[]
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  refreshToken String   @unique
+  userAgent    String?
+  ip           String?
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+model ApiKey {
+  id         String   @id @default(cuid())
+  userId     String
+  label      String
+  keyHash    String   @unique
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+// Rate-limit store — survives restarts, prevents sharing-memory resets from
+// allowing bursts after server bounce.
+model RateLimitBucket {
+  id        String   @id            // composite "{route}:{ip}:{minute}"
+  count     Int      @default(0)
+  resetAt   DateTime
+  @@map("rate_limit_buckets")
+}
+
+// Job record so the auth-backed API has audit trail of who transcribed what.
+model TranscriptionJob {
+  id           String   @id @default(cuid())
+  userId       String?
+  externalId   String?  @unique        // job id returned by stt-endpoint
+  filename     String?
+  bytes        Int      @default(0)
+  language     String?
+  status       String   @default("queued")
+  textPreview  String?                  // first 200 chars
+  createdAt    DateTime @default(now())
+  finishedAt   DateTime?
+}

@@ -1,154 +1,102 @@
 # STT Endpoint
 
-Microsserviço **HTTP STT** (speech-to-text) FastAPI baseado em
-[`faster-whisper`](https://github.com/SYSTRAN/faster-whisper). Projetado
-para ser deployado isoladamente e consumido pelo
-[`whatsapp-engine`](https://github.com/MauricioMilano/whatsapp-engine) (ou
-qualquer cliente HTTP).
-
-## Highlights
-
-- **Faster-Whisper** (CTranslate2) — ~4× mais rápido e 2× menos RAM que
-  o Whisper original da OpenAI.
-- **GPU/CPU fallback automático** — tenta CUDA, recai em CPU+int8 uma vez
-  se a GPU estiver indisponível.
-- **Fila em processo com semáforo** — limita transcrições simultâneas
-  (whisper é RAM-pesado, recomendado `STT_MAX_CONCURRENT=1`).
-- **Auth via `X-API-Key`** — simples e stateless.
-- **Logging JSON estruturado** — adequado para Loki/CloudWatch/Datadog.
-- **Endpoints `health`/`ready`** — probes prontos pra Kubernetes ou
-  Docker Compose.
-
-## Visão geral
+Microsserviço HTTP STT (speech-to-text) em FastAPI, com **dashboard web**
+incluído. Composto por três partes que rodam juntas:
 
 ```
-┌───────────────────┐   POST /v1/transcribe  ┌────────────────────┐
-│  whatsapp-engine  │ ─────────────────────► │   stt-endpoint     │
-│  (ou qualquer     │  multipart, X-API-Key  │   (este serviço)   │
-│   cliente HTTP)   │ ◄───────────────────── │   faster-whisper   │
-└───────────────────┘   { text, language }   └────────────────────┘
+.
+├── app/                   # FastAPI STT (Python, faster-whisper)
+├── auth-service/          # Express auth gateway (Node, Prisma + SQLite)
+└── frontend/              # React + Vite UI (dashboard, login, etc.)
 ```
 
-## Comparação de modelos Whisper
+Ver documentação detalhada por subsistema:
 
-| Modelo     | Tamanho | RAM (CPU) | Velocidade (CPU 1×) | Precisão |
-|------------|--------:|----------:|--------------------:|----------|
-| `tiny`     |  ~75 MB |    ~390 MB|           ~10× real |    ★★☆     |
-| `base`     | ~142 MB |    ~500 MB|           ~7× real  |    ★★★     |
-| `small`    | ~466 MB |    ~1 GB  |           ~3× real  |    ★★★★   |
-| `medium`   |  ~1.5 GB|    ~3 GB  |           ~1× real  |    ★★★★☆  |
-| `large-v3` |  ~3 GB  |    ~5 GB  |         ~0.3× real  |    ★★★★★  |
+- **STT puro:** leia o código em `app/main.py`.
+- **Auth gateway:** [`auth-service/README.md`](auth-service/README.md)
+- **Frontend UI:** [`frontend/README.md`](frontend/README.md)
 
-*Velocidade expressa em "X vezes mais rápido que o áudio" — 5× = processa
-5 segundos de áudio em 1 segundo.*
+## Stack
 
-Recomendação inicial: **`base`** em GPU ou **`tiny`** em CPU para conversas
-curtas. Promova para `medium` quando precisar de nomes próprios ou sotaques
-fortes.
+| Subsistema    | Stack                                        | Porta padrão |
+|---------------|----------------------------------------------|--------------|
+| STT (Python)  | FastAPI · faster-whisper · uvicorn           | `8000`       |
+| Auth (Node)   | Express · Prisma · SQLite · JWT · CSRF       | `4000`       |
+| Frontend      | React 18 · React Router · Vite               | `5173`       |
 
-## Endpoints
-
-| Método | Caminho                | Auth | Descrição |
-|--------|------------------------|------|-----------|
-| GET    | `/health`              | —    | Liveness probe. |
-| GET    | `/ready`               | —    | Readiness + estado do modelo + estatísticas da fila. |
-| POST   | `/v1/transcribe`       | sim  | Recebe multipart `audio=@file` (e opcional `language=pt`). Retorna `{id,status,result:{text,language,duration,model}}`. |
-| GET    | `/v1/jobs/{job_id}`    | sim  | Status de um job criado (útil pra clientes assíncronos). |
-
-### Exemplo — cURL
+## Quickstart (dev)
 
 ```bash
-curl -X POST http://localhost:8000/v1/transcribe \
-  -H "X-API-Key: $STT_API_KEY" \
-  -F "audio=@recording.webm" \
-  -F "language=pt"
-```
-
-### Exemplo — resposta
-
-```json
-{
-  "id": "8b2f...",
-  "status": "done",
-  "result": {
-    "text": "Olá, gostaria de agendar um corte para amanhã.",
-    "language": "pt",
-    "duration": 3.42,
-    "model": "base"
-  },
-  "created_at": 1719688800.123,
-  "started_at": 1719688800.456,
-  "finished_at": 1719688804.901
-}
-```
-
-## Como rodar
-
-### Local (dev)
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-cp .env.example .env
-# edite .env — pelo menos STT_API_KEY
-
+# 1. Backend Python (STT real)
+pip install -e ".[dev]"`
+cp .env.example .env        # fill in STT_API_KEY
 uvicorn app.main:app --reload --port 8000
+
+# 2. Auth gateway
+cd auth-service
+npm install
+cp .env.example .env        # fill in JWT_*, STT_*
+npx prisma db push --skip-generate --accept-data-loss
+npm run dev                 # http://localhost:4000
+
+# 3. Frontend
+cd ../frontend
+npm install
+npm run dev                 # http://localhost:5173
 ```
 
-### Docker (recomendado p/ deploy)
+Abre <http://localhost:5173>, faz o fluxo **Register → Login → Dashboard →
+Upload de áudio** e em segundos vê a transcrição na lista.
 
-```bash
-cp .env.example .env
-# edite STT_API_KEY para algo forte
-docker compose up --build
-```
+## Features
 
-Para GPU, use um Dockerfile com base CUDA
-(veja `docker-compose.yml` — perfil `cuda`):
+| Categoria       | O que tem |
+|-----------------|-----------|
+| Auth            | Register · login · logout · JWT access (15 min) + refresh (30 d) · rotação de refresh · bcrypt(12) |
+| Password reset  | Token de uso único, expira em 30 min, invalida todas as sessões |
+| Cookies         | httpOnly + Secure (em prod) + SameSite · CSRF double-submit |
+| CSRF            | Double-submit cookie com `X-CSRF-Token` (testado em supertest) |
+| Rate limit      | Persistente em SQLite (sobrevive restart) · headers `X-RateLimit-*` + `Retry-After` |
+| CORS            | Allow-list via env, fallback controlado |
+| Swagger         | OpenAPI 3.0 + UI em `/docs`, spec em `/openapi.json` |
+| Helmet          | Headers de segurança padrão |
+| Transcrição     | Proxy para STT upstream com audit log em DB |
+| Validation      | express-validator (registro/login/reset) |
+| Logs            | JSON estruturado (1 linha por evento) |
 
-```bash
-docker compose --profile cuda up --build
-```
+## API endpoints (atrás do auth-service)
 
-## Variáveis de ambiente
+| Método | Caminho                       | Auth        | Descrição |
+|--------|-------------------------------|-------------|-----------|
+| GET    | `/csrf-mint`                  | —           | Devolve + seta `csrf_token` cookie |
+| POST   | `/auth/register`              | —           | Cria conta |
+| POST   | `/auth/login`                 | —           | Login (cookies + body) |
+| POST   | `/auth/refresh`               | refresh     | Rotaciona tokens |
+| POST   | `/auth/logout`                | —           | Revoga sessão |
+| GET    | `/auth/me`                    | sim         | Usuário atual |
+| POST   | `/auth/forgot-password`       | —           | Token de reset (em dev vem na resposta) |
+| POST   | `/auth/reset-password`        | —           | Consome token + invalida sessões |
+| POST   | `/api/transcriptions`         | sim         | multipart audio → upstream STT |
+| GET    | `/api/transcriptions`         | sim         | Histórico do usuário |
+| GET    | `/api/transcriptions/:id`     | sim         | Detalhe |
+| DELETE | `/api/transcriptions/:id`     | sim         | Apagar |
+| GET    | `/health`                     | —           | Liveness |
+| GET    | `/ready`                      | —           | DB + status |
+| GET    | `/docs`                       | —           | Swagger UI |
+| GET    | `/openapi.json`               | —           | Spec |
 
-Todas têm prefixo `STT_`. Veja [`.env.example`](.env.example) para a lista
-completa. Principais:
+Documentação completa interativa em <http://localhost:4000/docs>.
 
-| Variável                | Padrão       | Significado |
-|-------------------------|--------------|-------------|
-| `STT_API_KEY`           | (obrigatório)| Segredo enviado no header `X-API-Key`. |
-| `STT_MODEL_SIZE`        | `base`       | `tiny`/`base`/`small`/`medium`/`large-v3`. |
-| `STT_DEVICE`            | `cuda`       | `cuda` ou `cpu`. Cai pra CPU automaticamente em falha. |
-| `STT_COMPUTE_TYPE`      | `float16`    | `float16` (GPU), `int8` (CPU). |
-| `STT_LANGUAGE`          | `pt`         | Força o idioma (`pt`, `en`...). Vazio = auto-detect. |
-| `STT_MAX_CONCURRENT`    | `1`          | Limite de transcrições simultâneas. |
-| `STT_MAX_FILE_SIZE_MB`  | `25`         | Upload máximo aceito. |
-| `STT_TIMEOUT_SECONDS`   | `120`        | Timeout duro por job. |
-| `STT_MODELS_DIR`        | `./models`   | Onde faster-whisper guarda o modelo baixado. |
-| `STT_LOG_LEVEL`         | `INFO`       | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
+## Deploy em produção
 
-## Testes
+Defina:
 
-```bash
-pytest -q
-```
+- `COOKIE_SECURE=true` (HTTPS)
+- `CORS_ORIGINS=https://app.mauriciomilano.com`
+- `STT_ENDPOINT=http://stt-interno:8000` (mesma VPC)
+- `STT_API_KEY` segura (openssl rand -base64 32)
+- `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `CSRF_SECRET` fortes e distintos
 
-Os testes usam um `Transcriber` mockado — **whisper não é baixado nem
-executado** durante `pytest`. CI-friendly.
+## License
 
-## Limitações conhecidas
-
-- **Sem persistência de jobs** — a fila é in-process; reinício zera tudo.
-- **Sem TTS** — só transcreve. Para TTS, veja o
-  [`voice-chat`](https://github.com/MauricioMilano/voice-chat).
-- **Whisper `tiny`/`base` erram nomes próprios** — para esse caso use
-  `medium` ou `large-v3`.
-- **Custo de CPU sem GPU** — `large-v3` em CPU é inviável (10× tempo real).
-  Fique em `tiny`/`base` se for CPU-only.
-
-## Licença
-
-MIT — veja [LICENSE](LICENSE).
+MIT — Copyright (c) 2026 MauricioMilano.
