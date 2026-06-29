@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtualenv
+.venv/
+venv/
+env/
+ENV/
+
+# Test/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime
+*.log
+*.pid
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Whisper models (downloaded at runtime)
+models/
+*.bin
+*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,37 @@
+# Build / venv artifacts
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+dist
+build
+
+# Editor / IDE
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Runtime models / secrets
+models
+*.bin
+*.pt
+.env
+.env.*
+!.env.example
+
+# Tests (we run them inside the build image)
+tests
+
+# Docs (already in repo)
+README.md
+LICENSE
