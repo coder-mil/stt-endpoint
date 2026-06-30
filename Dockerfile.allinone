@@ -3,8 +3,9 @@
 # STT Endpoint — all-in-one image.
 #
 # Single container that runs FastAPI (STT), Node auth-service, and nginx
-# (frontend) under supervisord. Use this on platforms (e.g., Easypanel,
-# single-container PaaS) that don't orchestrate multi-service compose stacks.
+# (frontend) inside a single shell script (start.sh). Use this on platforms
+# (e.g., Easypanel, single-container PaaS) that don't orchestrate multi-
+# service compose stacks.
 #
 # For multi-service deployments use docker-compose.yml + the per-service
 # Dockerfiles (Dockerfile, app/Dockerfile, app/Dockerfile.cuda,
@@ -84,19 +85,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production
 
 # System packages:
-#   nginx          serves frontend, proxies /api /auth /docs -> 127.0.0.1:4000
-#   supervisor     ties the three processes together, restarts on death
-#   nodejs 20.x   needed by the auth-service (bookworm has 18, backports has 20)
-#   wget           busybox in slim has it; pin it explicitly for the wait loop
-#   libgomp1       faster-whisper/numpy
-#   curl           healthcheck
+#   nginx-light  serves frontend, proxies /api /auth /docs -> 127.0.0.1:4000
+#   ca-certificates + curl + wget for health-check + downloads (start.sh uses curl)
+#   libgomp1     faster-whisper/numpy
+#   gnupg + nodejs20 from Nodesource   nodejs auth-service runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         nginx-light \
-        supervisor \
-        wget \
         ca-certificates \
         curl \
+        wget \
         libgomp1 \
         gnupg \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
@@ -108,9 +106,9 @@ RUN apt-get update \
 # /opt/auth       Express auth + Prisma  (Node)
 # /var/lib/stt    pre-baked Whisper model files (persisted via volume)
 # /var/lib/auth   SQLite database file (persisted via volume)
-# /etc/supervisor supervisord.conf (program defs)
 # /etc/nginx      nginx.conf (frontend reverse-proxy)
 # /usr/share/nginx/html  static React build output
+# /var/log/supervisord  not used (no supervisord here)
 # ----------------------------------------------------------------------------
 
 # FastAPI wheel — installed in the runtime to keep build context manageable.
@@ -142,10 +140,8 @@ RUN sed 's/auth-service:4000/127.0.0.1:4000/g' \
  && rm /etc/nginx/nginx.conf.template \
  && rm /etc/nginx/sites-enabled/default
 
-# supervisord program definitions.
-COPY app/supervisor.conf /etc/supervisor/supervisord.conf
-
-# Entrypoint — runs migrations, waits for STT /ready, hands over to supervisord.
+# Entrypoint — runs migrations, waits for STT /ready, brings up auth + nginx.
+# No supervisor; the script manages everything itself.
 COPY app/start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 
@@ -154,18 +150,14 @@ RUN chmod +x /usr/local/bin/start.sh
 # is lost on restart — that's the caller's trade-off, not ours.
 RUN mkdir -p /var/lib/stt/models /var/lib/auth
 
-# Runtime dirs supervisord and nginx need. Created here so the supervisord
-# process (running as root, PID 1) finds them already present and writes the
-# unix socket + pidfile into /var/run.
+# Runtime dirs nginx needs. created here so the worker (running as
+# www-data) finds them already present and writable.
 RUN mkdir -p \
         /var/cache/nginx \
         /var/log/nginx \
-        /var/run \
-        /var/log/supervisord \
- && chown -R www-data:www-data /var/cache/nginx /var/log/nginx /var/lib/stt \
- && chmod 755 /var/log/supervisord
+ && chown -R www-data:www-data /var/cache/nginx /var/log/nginx /var/lib/stt
 
-# supervisord runs as PID 1 but we expose 80 through nginx (program:nginx).
+# start.sh is the actual PID 1; nginx binds port 80 for the public.
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
