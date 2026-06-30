@@ -1,0 +1,167 @@
+# syntax=docker/dockerfile:1.6
+# =============================================================================
+# STT Endpoint — all-in-one image.
+#
+# Single container that runs FastAPI (STT), Node auth-service, and nginx
+# (frontend) under supervisord. Use this on platforms (e.g., Easypanel,
+# single-container PaaS) that don't orchestrate multi-service compose stacks.
+#
+# For multi-service deployments use docker-compose.yml + the per-service
+# Dockerfiles (Dockerfile, app/Dockerfile, app/Dockerfile.cuda,
+# auth-service/Dockerfile, frontend/Dockerfile).
+#
+# Tunables:
+#   --build-arg STT_MODEL_SIZE=base   default model to pre-bake
+#   --build-arg STT_HF_REPO=...       optional CT2 mirror for unofficial
+#                                     models (large-v3-turbo et al.)
+#   --build-arg ENABLE_BAKE=true|false  set false to skip the heavy model
+#                                      download at build time (CI smoke tests)
+# =============================================================================
+
+# ============================================================================
+# Stage 1 — build the FastAPI wheel
+# ============================================================================
+FROM python:3.11-slim AS stt-builder
+
+WORKDIR /build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md LICENSE ./
+COPY app ./app
+
+RUN python -m pip install --no-cache-dir --upgrade pip build \
+ && python -m build --wheel --outdir /dist
+
+
+# ============================================================================
+# Stage 2 — install auth-service deps (production only)
+# ============================================================================
+FROM node:20-alpine AS auth-builder
+
+WORKDIR /opt/auth
+
+# Install ONLY runtime dependencies so the final image does not carry devDeps
+# or the prisma CLI tools.
+COPY auth-service/package.json auth-service/package-lock.json* ./
+RUN npm install --omit=dev --no-audit --no-fund --loglevel=error
+
+# Copy source + prisma schema + generated client placeholder.
+COPY auth-service/src ./src
+COPY auth-service/prisma ./prisma
+
+# Generate the Prisma client into node_modules so runtime finds it without the
+# CLI binary on PATH. Prisma v5 produces a `@prisma/client` import-ready file.
+RUN npx --yes prisma generate --schema ./prisma/schema.prisma
+
+
+# ============================================================================
+# Stage 3 — build the React frontend (static bundle)
+# ============================================================================
+FROM node:20-alpine AS web-builder
+
+WORKDIR /opt/web
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install --no-audit --no-fund --loglevel=error
+
+COPY frontend/ ./
+# VITE_API_BASE empty → the frontend uses relative paths (/api, /auth, ...)
+# which resolve against the same nginx origin. No env injection needed.
+RUN npm run build
+
+
+# ============================================================================
+# Stage 4 — runtime image
+# ============================================================================
+FROM python:3.11-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    NODE_ENV=production
+
+# System packages:
+#   nginx          serves frontend, proxies /api /auth /docs -> 127.0.0.1:4000
+#   supervisor     ties the three processes together, restarts on death
+#   nodejs 20.x   needed by the auth-service (bookworm has 18, backports has 20)
+#   wget           busybox in slim has it; pin it explicitly for the wait loop
+#   libgomp1       faster-whisper/numpy
+#   curl           healthcheck
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        nginx-light \
+        supervisor \
+        wget \
+        ca-certificates \
+        curl \
+        libgomp1 \
+        gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+# ---- Layout ----------------------------------------------------------------
+# /opt/stt        FastAPI service (Python)
+# /opt/auth       Express auth + Prisma  (Node)
+# /var/lib/stt    pre-baked Whisper model files (persisted via volume)
+# /var/lib/auth   SQLite database file (persisted via volume)
+# /etc/supervisor supervisord.conf (program defs)
+# /etc/nginx      nginx.conf (frontend reverse-proxy)
+# /usr/share/nginx/html  static React build output
+# ----------------------------------------------------------------------------
+
+# FastAPI wheel — installed in the runtime to keep build context manageable.
+COPY --from=stt-builder /dist/*.whl /tmp/
+RUN python -m pip install --no-cache-dir /tmp/*.whl \
+ && rm -f /tmp/*.whl
+
+# STT source — only needed for `python -m uvicorn app.main:app`.
+COPY app /opt/stt/app
+
+# Auth service — full source + node_modules from builder.
+COPY --from=auth-builder /opt/auth/node_modules /opt/auth/node_modules
+COPY --from=auth-builder /opt/auth/src          /opt/auth/src
+COPY --from=auth-builder /opt/auth/prisma       /opt/auth/prisma
+# prisma client lives under node_modules/@prisma/client (generated above)
+# and looks at this schema path for engine binaries.
+COPY auth-service/package.json /opt/auth/package.json
+
+# Frontend build artifacts.
+COPY --from=web-builder /opt/web/dist /usr/share/nginx/html
+
+# nginx config: replace the cross-host 'auth-service:4000' upstream with the
+# in-container localhost so the same config file works in both compose and
+# all-in-one modes.
+COPY frontend/nginx.conf /etc/nginx/nginx.conf.template
+RUN sed 's/auth-service:4000/127.0.0.1:4000/g' \
+        /etc/nginx/nginx.conf.template \
+        > /etc/nginx/nginx.conf \
+ && rm /etc/nginx/nginx.conf.template \
+ && rm /etc/nginx/sites-enabled/default
+
+# supervisord program definitions.
+COPY app/supervisor.conf /etc/supervisor/supervisord.conf
+
+# Entrypoint — runs migrations, waits for STT /ready, hands over to supervisord.
+COPY app/start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
+
+# Persistent directories. In single-container PaaS these are typically mounted
+# to bind storage; if not, the data goes into the container's filesystem and
+# is lost on restart — that's the caller's trade-off, not ours.
+RUN mkdir -p /var/lib/stt/models /var/lib/auth
+
+# nginx must own its runtime dirs.
+RUN mkdir -p /var/cache/nginx /var/log/nginx /var/run \
+ && chown -R www-data:www-data /var/cache/nginx /var/log/nginx /var/lib/stt
+
+# supervisord runs as PID 1 but we expose 80 through nginx (program:nginx).
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:80/health >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/start.sh"]

@@ -12,7 +12,8 @@ __pycache__
 .ruff_cache
 .coverage
 htmlcov
-dist
+# Build output dirs we create deliberately are copied explicitly in the
+# Dockerfile; this generic `dist` rule would also strip frontend/dist.
 build
 
 # Editor / IDE
@@ -21,7 +22,8 @@ build
 *.swp
 .DS_Store
 
-# Runtime models / secrets
+# Runtime models / secrets (STT baker output goes to /app/models inside
+# the image, not the host side, so a stray `./models` dir on host is dev only).
 models
 *.bin
 *.pt
@@ -29,5 +31,11 @@ models
 .env.*
 !.env.example
 
-# Tests (we run them inside the build image)
+# Python source layout (build context copies app/, frontend/, etc explicitly).
 tests
+
+# Test artifacts + dev data
+auth-service/test
+auth-service/prisma/dev.db
+auth-service/prisma/dev.db-journal
+
