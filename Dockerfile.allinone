@@ -154,9 +154,16 @@ RUN chmod +x /usr/local/bin/start.sh
 # is lost on restart — that's the caller's trade-off, not ours.
 RUN mkdir -p /var/lib/stt/models /var/lib/auth
 
-# nginx must own its runtime dirs.
-RUN mkdir -p /var/cache/nginx /var/log/nginx /var/run \
- && chown -R www-data:www-data /var/cache/nginx /var/log/nginx /var/lib/stt
+# Runtime dirs supervisord and nginx need. Created here so the supervisord
+# process (running as root, PID 1) finds them already present and writes the
+# unix socket + pidfile into /var/run.
+RUN mkdir -p \
+        /var/cache/nginx \
+        /var/log/nginx \
+        /var/run \
+        /var/log/supervisord \
+ && chown -R www-data:www-data /var/cache/nginx /var/log/nginx /var/lib/stt \
+ && chmod 755 /var/log/supervisord
 
 # supervisord runs as PID 1 but we expose 80 through nginx (program:nginx).
 EXPOSE 80
