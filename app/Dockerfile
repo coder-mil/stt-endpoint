@@ -43,6 +43,10 @@ ARG STT_MODEL_SIZE=base
 FROM runtime-base AS baker
 
 # Sanitize input — only allow short lowercase alnum + dash.
+# Allowed: tiny, base, small, medium, large, large-v2, large-v3, distil-large-v3
+# For "large-v3-turbo" use a community CT2 mirror (NOT in the official
+# faster-whisper catalog, so not whitelisted here) and pass
+# STT_HF_REPO=<huggingface-repo-id> instead.
 RUN case "$STT_MODEL_SIZE" in \
        tiny|base|small|medium|large|large-v2|large-v3|distil-large-v3) ;; \
        *) echo "Invalid STT_MODEL_SIZE: $STT_MODEL_SIZE" && exit 1 ;; \
