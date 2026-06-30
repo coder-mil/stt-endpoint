@@ -31,7 +31,3 @@ models
 
 # Tests (we run them inside the build image)
 tests
-
-# Docs (already in repo)
-README.md
-LICENSE
