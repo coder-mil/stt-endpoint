@@ -1,5 +1,10 @@
-#!/bin/sh
+#!/bin/bash
 # Entrypoint for the all-in-one image. Single script, no supervisord.
+#
+# Why bash, not sh: the script uses `wait -n <pids>` to block until any one
+# of the tracked children exits. That's bash-specific (bash 4.3+); dash,
+# which /bin/sh symlinks to on Debian, rejects `wait -n` with
+# "Illegal option". bash is already in the runtime image, so we use it.
 #
 # This script IS PID 1. It runs the three services directly:
 #
@@ -25,7 +30,7 @@
 # Easypanel) restarts the container. Without that loop we would have to
 # duplicate restart logic in shell.
 
-set -eu
+set -euo pipefail
 
 LOG_PREFIX="entrypoint"
 
@@ -72,10 +77,10 @@ log "running prisma migrate deploy"
 DATABASE_URL="${DATABASE_URL:-file:/var/lib/auth/prod.db}"
 export DATABASE_URL
 
-# /opt/auth is where the build stage copied the prisma/ directory. We do
-# NOT cd there permanently — auth will cd into /opt/auth itself when it
-# starts (the start.sh then resumes from /).
-if ! npx --yes prisma migrate deploy \
+# npx needs cwd to be /opt/auth so it picks up the local prisma CLI in
+# node_modules (avoids the network round-trip via `npx --yes`).
+cd /opt/auth
+if ! npx prisma migrate deploy \
         --schema /opt/auth/prisma/schema.prisma 2>&1 \
         | grep -E "^(Applying|warning|Prisma|Already|No migration)" ; then
     :   # npx exit code may vary by version; we already log the greps above
