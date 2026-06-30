@@ -1,41 +1,54 @@
 #!/bin/sh
 # Entrypoint for the all-in-one image.
 #
-# Sequence:
-#   1. Run prisma migrate deploy (idempotent). If migration fails, do NOT
-#      continue — the whole container is broken at that point.
-#   2. Wait for STT uvicorn to be ready (auth's startup healthchecks it).
-#   3. Tell supervisord to start `auth` and `nginx` programs now.
-#   4. supervisord takes over as PID 1 and reaps everything.
+# Boot order (this script is PID 1):
+#
+#   1. Run Prisma migrations.
+#   2. Start supervisord in the background — its `program:stt` has
+#      autostart=true and uvicorn comes up in 2-5s.
+#   3. Wait for STT to answer HTTP 200 at /ready.
+#   4. Issue supervisorctl start for `auth` (needs STT) and `nginx`
+#      (needs auth for /health proxy).
+#   5. Wait on supervisord (it traps SIGTERM inside its own config).
+#
+# When the orchestrator (Easypanel/Docker) sends SIGTERM to PID 1, we forward
+# it to the supervisord child so it can shut down programs in order.
 
 set -eu
 
 LOG_PREFIX="entrypoint"
 
+# ---------------------------------------------------------- 1. migrations ----------
 echo "$LOG_PREFIX: running prisma migrate deploy"
 cd /opt/auth
-# DATABASE_URL is injected by supervisord → program:auth environment, but here we
-# run as PID 1 / the entrypoint process. Pull from container env instead.
 if [ -z "${DATABASE_URL:-}" ]; then
     export DATABASE_URL="file:/var/lib/auth/prod.db"
 fi
-# --schema is required because /opt/auth has the prisma/ directory as expected
-# by prisma v5. `deploy` is the production-safe variant: applies migrations
-# without prompting.
 npx --yes prisma migrate deploy --schema /opt/auth/prisma/schema.prisma
 
-echo "$LOG_PREFIX: waiting for STT /ready at 127.0.0.1:8000"
-# supervisord program:stt autostarts before this script runs; uvicorn
-# usually comes up in 2-5 s. We give it 60 s before giving up.
+# ---------------------------------------------------------- 2. start supervisord ---
+echo "$LOG_PREFIX: starting supervisord (program:stt autostarts immediately)"
+supervisord -c /etc/supervisor/supervisord.conf &
+SUPERVISORD_PID=$!
+
+# Forward SIGTERM/SIGINT to supervisord so the whole stack shuts down cleanly
+# when the orchestrator stops the container.
+trap 'kill -TERM "$SUPERVISORD_PID" 2>/dev/null || true; exit 143' TERM INT
+
+# ---------------------------------------------------------- 3. wait STT ready ------
+echo "$LOG_PREFIX: waiting for STT /ready at 127.0.0.1:8000 (max 120s)"
 TRIES=0
-MAX=120
-until wget -q -O- http://127.0.0.1:8000/ready >/dev/null 2>&1; do
+MAX=240       # 240 × 0.5s = 120s
+until curl -fsS -o /dev/null http://127.0.0.1:8000/ready 2>/dev/null; do
     TRIES=$((TRIES+1))
-    if [ "$TRIES" -ge "$MAX" ]; then
-        echo "$LOG_PREFIX: STT did not become ready in $((MAX/2))s — bailing out"
+    if ! kill -0 "$SUPERVISORD_PID" 2>/dev/null; then
+        echo "$LOG_PREFIX: supervisord exited unexpectedly — bailing out"
         exit 1
     fi
-    # Print progress every ~10s so the user sees we're alive.
+    if [ "$TRIES" -ge "$MAX" ]; then
+        echo "$LOG_PREFIX: STT did not become ready in 120s — bailing out"
+        exit 1
+    fi
     if [ $((TRIES % 20)) -eq 0 ]; then
         echo "$LOG_PREFIX: still waiting (${TRIES}/${MAX})"
     fi
@@ -43,9 +56,14 @@ until wget -q -O- http://127.0.0.1:8000/ready >/dev/null 2>&1; do
 done
 echo "$LOG_PREFIX: STT ready"
 
+# ---------------------------------------------------------- 4. start auth + nginx --
 echo "$LOG_PREFIX: starting auth and nginx via supervisorctl"
 supervisorctl -c /etc/supervisor/supervisord.conf start auth
 supervisorctl -c /etc/supervisor/supervisord.conf start nginx
 
-echo "$LOG_PREFIX: handover to supervisord (PID 1) — exec it"
-exec supervisord -c /etc/supervisor/supervisord.conf
+# ---------------------------------------------------------- 5. wait ----------------
+echo "$LOG_PREFIX: handing over — waiting on supervisord (PID $SUPERVISORD_PID)"
+wait "$SUPERVISORD_PID"
+EXIT_CODE=$?
+echo "$LOG_PREFIX: supervisord exited with $EXIT_CODE"
+exit "$EXIT_CODE"
