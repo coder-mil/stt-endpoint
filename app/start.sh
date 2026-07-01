@@ -130,8 +130,14 @@ STT_ENDPOINT="${STT_ENDPOINT:-http://127.0.0.1:8000}"
 # / STT_API_KEY are NOT defaulted — auth refuses to start without them.
 export PORT NODE_ENV DATABASE_URL STT_ENDPOINT
 
-/usr/local/bin/node src/index.js \
-    >> /proc/1/fd/1 2>> /proc/1/fd/2 &
+# NodeSource installs as `nodejs` (not `node`) on Debian. Make sure `node`
+# resolves to that binary before launching, in case /usr/local/bin/node
+# doesn't exist on this image variant.
+if [ ! -e /usr/local/bin/node ] && [ -e /usr/bin/nodejs ]; then
+    ln -s /usr/bin/nodejs /usr/local/bin/node
+fi
+node src/index.js \
+    >> /var/log/auth.out 2>> /var/log/auth.err &
 AUTH_PID=$!
 log "auth pid=$AUTH_PID"
 
@@ -146,8 +152,10 @@ fi
 
 # --------------------------------------------------- 4. start nginx ------------
 log "starting nginx (port 80, public)"
+mkdir -p /var/log
+touch /var/log/auth.out /var/log/auth.err
 /usr/sbin/nginx -g "daemon off;" \
-    >> /proc/1/fd/1 2>> /proc/1/fd/2 &
+    >> /var/log/nginx.out 2>> /var/log/nginx.err &
 NGINX_PID=$!
 log "nginx pid=$NGINX_PID"
 

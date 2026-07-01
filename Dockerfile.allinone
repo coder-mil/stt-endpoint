@@ -98,8 +98,11 @@ RUN apt-get update \
         libgomp1 \
         gnupg \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends nodejs procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/nodejs /usr/local/bin/node \
+ && ln -sf /usr/bin/npx /usr/local/bin/npx \
+ && ln -sf /usr/bin/npm /usr/local/bin/npm
 
 # ---- Layout ----------------------------------------------------------------
 # /opt/stt        FastAPI service (Python)
